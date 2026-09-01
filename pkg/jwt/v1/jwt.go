@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
-	httphelper "github.com/kjetils-labs/go-utils/pkg/http"
+	httphelper "github.com/kjetils-labs/go-utils/pkg/http/v1"
 )
 
 type Scope string
