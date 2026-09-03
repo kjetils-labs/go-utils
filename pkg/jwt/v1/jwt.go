@@ -2,9 +2,11 @@ package jwt
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/rsa"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
 	httphelper "github.com/kjetils-labs/go-utils/pkg/http/v1"
@@ -23,67 +25,66 @@ type Manager interface {
 	ParseAndValidateToken(Ctx context.Context, tokenString string, claims jwt.Claims) (*jwt.Token, error)
 }
 
-// ApprovedSigningMethod is a type that represents the approved signing methods for JWT tokens in our implementation.
-type ApprovedSigningMethod string
-
-const (
-
-	// HS256 is the HMAC SHA-256 signing method
-	// It signs the token using a secret key and is symetrical, meaning the same key is used for both signing and verification.
-	HS256 ApprovedSigningMethod = "HS256"
-
-	// RS256 is the RSA SHA-256 signing method
-	// It signs the token using a private key and is asymmetrical, meaning a public key is used for verification.
-	RS256 ApprovedSigningMethod = "RS256"
-)
-
-// ToSigningMethod converts and validates the ApprovedSigningMethod to the corresponding jwt.SigningMethod.
-func (m ApprovedSigningMethod) ToSigningMethod() jwt.SigningMethod {
-	switch m {
-	case HS256:
-		return jwt.SigningMethodHS256
-	case RS256:
-		return jwt.SigningMethodRS256
-	default:
-		return nil
-	}
-}
-
 type (
 	JWTManager struct {
 		secretKey     []byte
-		publicKey     *rsa.PublicKey
-		privateKey    *rsa.PrivateKey
+		rsaPrivateKey *rsa.PrivateKey
+		esPrivateKey  *ecdsa.PrivateKey
 		signingMethod jwt.SigningMethod
+		symmetric     bool
 	}
 
 	JWTManagerOptions func(*JWTManager) error
 )
 
 func newJWTManager() *JWTManager {
-	return &JWTManager{}
+	return &JWTManager{
+		secretKey:     nil,
+		rsaPrivateKey: nil,
+		esPrivateKey:  nil,
+		signingMethod: nil,
+		symmetric:     false,
+	}
 }
 
-func WithSecretKey(secretKey []byte) JWTManagerOptions {
+func WithSymetricKey(secretKey []byte) JWTManagerOptions {
 	return func(j *JWTManager) error {
 		if j.signingMethod != nil {
 			return fmt.Errorf("signing method already set, cannot set secret key")
 		}
 		j.secretKey = secretKey
 		j.signingMethod = jwt.SigningMethodHS256
+		j.symmetric = true
 
 		return nil
 	}
 }
 
-func WithRSAKeys(privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey) JWTManagerOptions {
+// WithAsymetricRSAKeys sets the private and public keys for the JWTManager, along with the signing method.
+// Expected signing methods of the RS family, e.g. RS256, RS384, RS512, PS256, PS384, PS512.
+func WithAsymetricRSAKeys(privateKey *rsa.PrivateKey, signingMethod jwt.SigningMethod) JWTManagerOptions {
 	return func(j *JWTManager) error {
 		if j.signingMethod != nil {
-			return fmt.Errorf("signing method already set, cannot set RSA keys")
+			return fmt.Errorf("signing method already set, cannot set public/private key pair")
 		}
-		j.privateKey = privateKey
-		j.publicKey = publicKey
-		j.signingMethod = jwt.SigningMethodRS256
+
+		j.rsaPrivateKey = privateKey
+		j.signingMethod = signingMethod
+		j.symmetric = false
+
+		return nil
+	}
+}
+
+func WithAsymetricECDSAKeys(privateKey *ecdsa.PrivateKey, signingMethod jwt.SigningMethod) JWTManagerOptions {
+	return func(j *JWTManager) error {
+		if j.signingMethod != nil {
+			return fmt.Errorf("signing method already set, cannot set public/private key pair")
+		}
+
+		j.esPrivateKey = privateKey
+		j.signingMethod = signingMethod
+		j.symmetric = false
 
 		return nil
 	}
@@ -93,7 +94,10 @@ func WithRSAKeys(privateKey *rsa.PrivateKey, publicKey *rsa.PublicKey) JWTManage
 func NewJWTManager(opts ...JWTManagerOptions) (Manager, error) {
 	config := newJWTManager()
 	for _, opt := range opts {
-		opt(config)
+		err := opt(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to apply option: %w", err)
+		}
 	}
 
 	return config, nil
@@ -103,16 +107,23 @@ func (j *JWTManager) CreateToken(ctx context.Context, claims jwt.Claims) (string
 
 	token := jwt.NewWithClaims(j.signingMethod, claims)
 
-	switch j.signingMethod {
-	case jwt.SigningMethodHS256:
+	switch {
+	case strings.HasPrefix(j.signingMethod.Alg(), "HS"):
 		tokenString, err := token.SignedString(j.secretKey)
 		if err != nil {
 			return "", fmt.Errorf("failed to sign token: %w", err)
 		}
 
 		return tokenString, nil
-	case jwt.SigningMethodRS256:
-		tokenString, err := token.SignedString(j.privateKey)
+	case strings.HasPrefix(j.signingMethod.Alg(), "RS"):
+		tokenString, err := token.SignedString(j.rsaPrivateKey)
+		if err != nil {
+			return "", fmt.Errorf("failed to sign token: %w", err)
+		}
+
+		return tokenString, nil
+	case strings.HasPrefix(j.signingMethod.Alg(), "ES"):
+		tokenString, err := token.SignedString(j.esPrivateKey)
 		if err != nil {
 			return "", fmt.Errorf("failed to sign token: %w", err)
 		}
@@ -134,17 +145,20 @@ func (j *JWTManager) ParseAndValidateToken(_ context.Context, tokenString string
 			return nil, fmt.Errorf("unexpected token signing method: %v, expected %v", token.Method.Alg(), j.signingMethod)
 		}
 
-		switch j.signingMethod {
-
-		case jwt.SigningMethodHS256:
+		if j.symmetric {
 			return j.secretKey, nil
-
-		case jwt.SigningMethodRS256:
-			return j.publicKey, nil
-
-		default:
-			return nil, fmt.Errorf("unsupported signing method: %v", j.signingMethod.Alg())
 		}
+
+		if j.rsaPrivateKey != nil {
+			return &j.rsaPrivateKey.PublicKey, nil
+		}
+
+		if j.esPrivateKey != nil {
+			return &j.esPrivateKey.PublicKey, nil
+		}
+
+		return nil, fmt.Errorf("no valid key found for signing method: %v", j.signingMethod)
+
 	}
 
 	token, err := jwt.ParseWithClaims(tokenString, claims, keyFunc)
