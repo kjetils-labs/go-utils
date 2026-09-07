@@ -181,19 +181,29 @@ func (j *JWTManager) AuthenticationMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenString := r.Header.Get("Authorization")
 		if tokenString == "" {
-			httphelper.WriteJSONError(w, "Missing token", http.StatusUnauthorized)
+			httphelper.WriteJSONError(w, http.StatusUnauthorized, httphelper.WithErrorMessage("Missing Authorization header"))
 			return
 		}
 
 		claims := &jwt.MapClaims{}
 		token, err := j.ParseAndValidateToken(r.Context(), tokenString, claims)
 		if err != nil {
-			httphelper.WriteJSONError(w, "Invalid token", http.StatusUnauthorized)
+			httphelper.WriteJSONError(w,
+				http.StatusUnauthorized,
+				httphelper.WithExternalErrorMessage("unathorized"),
+				httphelper.WithError(err),
+				httphelper.WithInternalErrorMessage("failed to parse and validate token"),
+			)
 			return
 		}
 
 		if !token.Valid {
-			httphelper.WriteJSONError(w, "Invalid token", http.StatusUnauthorized)
+			httphelper.WriteJSONError(w,
+				http.StatusUnauthorized,
+				httphelper.WithExternalErrorMessage("unathorized"),
+				httphelper.WithError(err),
+				httphelper.WithInternalErrorMessage("invalid token"),
+			)
 			return
 		}
 
